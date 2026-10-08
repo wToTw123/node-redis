@@ -1,0 +1,93 @@
+name: XPENDING Ubuntu validation
+
+'on':
+  push:
+    branches: [codex/verify-xpending-ubuntu]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xpending-validation-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validation:
+    if: github.repository == 'wToTw123/node-redis'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        node: ['20', '22']
+        redis:
+          - tag: rs-7.4.0-v1
+            version: '7.4'
+          - tag: '8.2'
+            version: '8.2'
+          - tag: 8.4.0
+            version: '8.4'
+          - tag: 8.8.0
+            version: '8.8'
+          - tag: custom-30445126297-debian
+            version: '8.10'
+    env:
+      BASE_SHA: 9db9237a436139b443f5b16f43eeb0c18e08e993
+      REDIS_TAG: ${{ matrix.redis.tag }}
+      REDIS_VERSION: ${{ matrix.redis.version }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Record environment and install
+        run: |
+          mkdir -p validation-logs
+          { date -u; uname -a; node --version; npm --version; docker --version; git rev-parse HEAD; } | tee validation-logs/environment.txt
+          git diff --check "$BASE_SHA" HEAD
+          npm ci 2>&1 | tee validation-logs/install.txt
+      - name: Build all workspaces
+        id: build
+        run: npm run build 2>&1 | tee validation-logs/build.txt
+      - name: Lint, JSDoc, and offline regressions
+        run: |
+          npm run lint:changed -- --base "$BASE_SHA" 2>&1 | tee validation-logs/lint.txt
+          npm run check:command-jsdoc 2>&1 | tee validation-logs/jsdoc.txt
+          node node_modules/mocha/bin/mocha.js -r tsx packages/client/lib/commands/XPENDING_RANGE.arguments.spec.ts packages/client/lib/client/parser.spec.ts packages/client/lib/RESP/encoder.spec.ts --forbid-only --reporter spec 2>&1 | tee validation-logs/offline.txt
+      - name: Live Redis regressions in RESP2 and RESP3
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          docker pull "redislabs/client-libs-test:$REDIS_TAG" 2>&1 | tee validation-logs/image.txt
+          docker image inspect "redislabs/client-libs-test:$REDIS_TAG" --format '{{json .RepoDigests}}' | tee validation-logs/image-digest.txt
+          docker run -d --name codex-xpending-live --network host -e PORT=6399 "redislabs/client-libs-test:$REDIS_TAG"
+          node .github/scripts/codex-xpending-live.mjs 2>&1 | tee validation-logs/live.txt
+      - name: Remove live regression container
+        if: always()
+        run: |
+          if docker container inspect codex-xpending-live >/dev/null 2>&1; then
+            docker logs codex-xpending-live > validation-logs/live-server.txt 2>&1
+            docker rm -f codex-xpending-live
+          fi
+      - name: Full workspace test suite with upstream Redis flags
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          npm run cleanup
+          npm run test --workspaces --if-present -- --forbid-only --redis-tag="$REDIS_TAG" --redis-version="$REDIS_VERSION" 2>&1 | tee validation-logs/full-tests.txt
+      - name: Preserve logs, JUnit, and coverage
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: xpending-node-${{ matrix.node }}-redis-${{ matrix.redis.version }}
+          path: |
+            validation-logs/
+            junit-results/
+            packages/*/coverage/lcov.info
+          if-no-files-found: warn
+          retention-days: 14
