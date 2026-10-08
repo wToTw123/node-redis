@@ -36,7 +36,7 @@ jobs:
           - tag: custom-30445126297-debian
             version: '8.10'
     env:
-      BASE_SHA: 9db9237a436139b443f5b16f43eeb0c18e08e993
+      BASE_SHA: 5033f595f3e54f662c8c6cd9a6329decee595bf8
       REDIS_TAG: ${{ matrix.redis.tag }}
       REDIS_VERSION: ${{ matrix.redis.version }}
     steps:
